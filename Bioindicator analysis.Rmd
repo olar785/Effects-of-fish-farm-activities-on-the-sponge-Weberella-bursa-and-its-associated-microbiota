@@ -1,0 +1,368 @@
+---
+title: "Identification of putative bioindicators of fish farm impacts"
+author: "Olivier Laroche"
+date: "April 15, 2020"
+code_folding: hide
+toc_float: yes
+---
+
+
+##### Libraries & functions
+```{r collapse=T}
+library("DESeq2"); packageVersion("DESeq2")
+library(tidyverse); packageVersion("tidyverse")
+library(theseus); packageVersion("theseus")
+library(data.table); packageVersion("data.table")
+library(janitor); packageVersion("janitor")
+library(metagMisc); packageVersion("metagMisc")
+"%ni%" = Negate('%in%')
+```
+
+
+##### Loading data
+```{r}
+####################################################
+# Loading 16S taxonomic community 
+ps = readRDS("../../Data/Metabarcoding/16S_metabarcoding/Results_16S/Trimmed_data/ps_clean.rds")
+# Extracting metadata info
+env = pstoveg_sample(ps)
+# Removing duplicated samples
+ps = ps %>% subset_samples(ngs_name != "18_2" & ngs_name != "19_2" & ngs_name != "35_2" & ngs_name != "42_2")
+# Creating matrix of ASV count data
+ASV16S = pstoveg_otu(ps) %>% t()
+#dim(ASV16S)
+####################################################
+# Loading 16S functional community
+func16S = fread("../../Data/Metabarcoding/16S_metabarcoding/Results_16S/Trimmed_data/pirust2_out_pipeline/KO_metagenome_out/pred_metagenome_unstrat.tsv", header = T)
+func16S = func16S %>% column_to_rownames('function')
+#dim(func16S)
+####################################################
+# Loading fatty acids data
+fa = readxl::read_excel("../../Data/Fatty_acids/FA_profile_polymastia.xlsx") %>% clean_names()
+# Matching sample names with those of the metadata
+fa = fa[fa$sample_id %in% env$original_tube_label,]
+fa = fa[match(env$original_tube_label,fa$sample_id),]
+if (all(fa$sample_id == env$original_tube_label)) {
+  fa$sample_id = env$ngs_name
+}else{
+  stop("Unmatching labels")
+}
+fa = fa %>% column_to_rownames('sample_id')
+#dim(fa)
+####################################################
+# Loading isotope data
+SI = readxl::read_excel("../../Data/Stable_isotopes/Stable_isotopes.xlsx") %>% clean_names()
+# Matching sample names with those of the metadata
+SI$sample_id = gsub("_CN$","",SI$sample_id)
+SI = SI[SI$sample_id %in% env$original_tube_label,]
+SI = SI[match(env$original_tube_label,SI$sample_id),]
+if (all(SI$sample_id == env$original_tube_label)) {
+  SI$sample_id = env$ngs_name
+}else{
+  stop("Unmatching labels")
+}
+SI = SI %>% column_to_rownames('sample_id')
+SI_15N_13C = SI$percent_nitrogen_dry_weight / SI$percent_carbon_dry_weight
+names(SI_15N_13C) = rownames(SI)
+SI = SI[,c("percent_carbon_dry_weight","percent_nitrogen_dry_weight")]
+#dim(SI)
+####################################################
+# Loading deseq2 data
+dds <- readRDS("../../Data/Transcriptomics/diffexp/Translocation_trinity.deseq2_relevel.rds")
+```
+
+
+### Differential expression analysis with DeSeq2 
+##### mRNA data | identifying transcripts/genes of interest
+```{r}
+######## mRNA
+# Removing lowly expressed transcripts
+keep <- rowSums(counts(dds)) >= 10; dds <- dds[keep,]
+# Extracting results from the DeSeq2 analysis
+res <- DESeq2::results(dds, contrast=c("condition","Cage","Reference"))
+# Sort by p-value and keeping significant results only
+res <- res[order(res$baseMean),]; sigRes <- subset(res, padj <= 0.05)
+# Creating dataframe of the DeSeq2 results
+sigRes_df = sigRes %>% as.data.frame() %>% rownames_to_column("Genes")
+# Adding annotation to transcripts
+sigRes_mRNA = sigRes_df
+annot = fread("../../Data/Transcriptomics/diffexp/nema_gene_name_id_188.csv")
+# Keeping transcripts that were annotated only
+sigRes_mRNA = sigRes_mRNA[sigRes_mRNA$Genes %in% gsub("_i.*$", "",annot$seqid),]
+sigRes_mRNA = sigRes_mRNA[match(gsub("_i.*$", "",annot$seqid),sigRes_mRNA$Genes),]
+all(sigRes_mRNA$Genes == gsub("_i.*$", "",annot$seqid))
+sigRes_mRNA$Name = annot$Name;sigRes_mRNA$Protein = annot$Protein;sigRes_mRNA$Gene = annot$Gene;sigRes_mRNA$Bio_proc = annot$Bio_proc;sigRes_mRNA$Mol_func = annot$Mol_func;sigRes_mRNA$Label = annot$Label
+# Keeping non-bacterial genes and those with information only
+sigRes_mRNA = sigRes_mRNA[!grepl("bacteria",sigRes_mRNA$Name),]
+sigRes_mRNA = sigRes_mRNA[!is.na(sigRes_mRNA$Label),]
+sigRes_mRNA = sigRes_mRNA[order(sigRes_mRNA$log2FoldChange),]
+sigRes_mRNA$Genes = factor(sigRes_mRNA$Genes, levels = sigRes_mRNA$Genes)
+sigRes_mRNA$Label1 = paste0(sigRes_mRNA$Protein,": ", sigRes_mRNA$Label)
+# Producing barplot figure
+color_palette <- colorRampPalette(colors = c("gray98", "gray10"))(length(unique(sigRes_mRNA$Label1)));
+deseq2_genes = ggplot(sigRes_mRNA, aes(x=Genes)) +
+  geom_col(aes(y=log2FoldChange, fill = Label1) ) +
+  geom_text(aes(y=log2FoldChange, label=Label), position=position_dodge(width=0.9), vjust=-0.25) +
+  scale_fill_manual(values = color_palette) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust=0.5)) +
+  geom_hline(yintercept=0, linetype=1, color = "red")
+# Saving the figure in pdf format
+pdf('../../Figures/Differential_analysis/DE_genes.pdf',width=12,height=8,useDingbats=FALSE)
+deseq2_genes +theme(legend.position = "none")
+dev.off() 
+pdf('../../Figures/Differential_analysis/DE_genes_legend.pdf',width=12,height=8,useDingbats=FALSE)
+deseq2_genes 
+dev.off() 
+```
+
+
+###### 16S rRNA (ASVs) identifying bacterial taxa of interest
+```{r}
+# Filtering taxa to keep the most important/abundant only. Here, only ASVs with at least 10 reads in at least 10% of the samples are kept
+ps_trimmed = ps %>% filter_taxa(function(x) sum(x >= 10) > (0.1*length(x)), TRUE)
+# Factorizing distance groups
+ps_trimmed@sam_data$distance_group = factor(ps_trimmed@sam_data$distance_group, levels = c("R", "100","C"))
+# Importing data into a DeSeq2 object
+diagdds_ps_trimmed = phyloseq_to_deseq2(ps_trimmed, ~ distance_group)
+# Calculating the geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds_ps_trimmed), 1, gm_mean)
+Temp = estimateSizeFactors(diagdds_ps_trimmed, geoMeans = geoMeans)
+# Performing DeSeq2
+Temp = DESeq(Temp, fitType="local")
+# Extracting results from the DeSeq2 analysis
+res = results(Temp, cooksCutoff = FALSE)
+# Keeping significant results only
+sigtab = res[which(res$padj <= 0.05), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(ps_trimmed)[rownames(sigtab), ], "matrix"))
+sigtab = sigtab[complete.cases(sigtab), ]
+# Adding incidence of taxa
+taxa_sum = phyloseq_standardize_otu_abundance(ps_trimmed, method = "pa") %>% taxa_sums() %>% as.data.frame()
+taxa_sum$ASV = row.names(taxa_sum)
+taxa_sum = taxa_sum[taxa_sum$ASV %in% rownames(sigtab),]
+for (i in c(1:nrow(sigtab))) {
+  sigtab$Incidence[i] = taxa_sum[which(taxa_sum$ASV == rownames(sigtab)[i]),]$. / nsamples(ps_trimmed) * 100
+}
+# Adding percent of ASVs within genus that are significantly up or down regulated
+tax = ps_trimmed@tax_table %>% as.data.frame(stringsAsFactors = F)
+tax = tax[tax$Genus %in% sigtab$Genus,]
+tax$ASVs = rownames(tax)
+tax = tax %>% dplyr::group_by(Genus) %>% dplyr::summarise(N = length(unique(ASVs)))
+sigtab$ASVs = rownames(sigtab)
+tax2 = sigtab %>% dplyr::group_by(Genus) %>% dplyr::summarise(N = length(unique(ASVs)))
+tax2$Genus = as.character(tax2$Genus)
+tax2 <- tax2[order(tax2$Genus),]
+tax2 = tax2[tax2$Genus != "NA",]
+tax$Prop = round(tax2$N / tax$N *100,2)
+for (i in c(1:nrow(sigtab))) {
+  if(is.na(sigtab$Genus[i])){
+    sigtab$Prop[i] = tax[which(is.na(tax$Genus)),]$Prop
+  }
+  else{
+    sigtab$Prop[i] = tax[which(tax$Genus == sigtab$Genus[i]),]$Prop
+  }
+}
+sigtab$Genus = paste0(sigtab$Genus," (",sigtab$Prop,"%)")
+sigtab = sigtab %>% mutate_if(is.factor,as.character)
+sigtab = sigtab %>% dplyr::group_by(Genus) %>% mutate(Genus2 = if(n( ) > 1) {paste0(Genus, row_number( ))} else {paste0(Genus)})
+# Ordering the table by log2 fold change
+sigtab = sigtab[order(sigtab$log2FoldChange),]
+sigtab$Genus2 = factor(sigtab$Genus2, levels = sigtab$Genus2)
+# Producing the barplot figure
+deseq2_p = ggplot(sigtab, aes(x=Genus2)) +
+  geom_col(aes(y=sigtab$log2FoldChange, fill= Phylum) ) +
+  scale_fill_brewer(palette = "Greens") +
+  geom_point(aes(y=sigtab$Incidence/5),size=4)  +
+  scale_size_continuous(range = c(1,4)) +
+  #geom_point(data = TB[TB$detected_0.6 == T,], aes(y=Percent/20),pch=21, fill=NA, size=4, colour="red", stroke=1) +
+  geom_segment(aes(x=Genus2, xend=Genus2, y=0, yend=Incidence/5),linetype=3) +
+  scale_y_continuous(name="Log2FoldChange",breaks = seq(0,25,5) , sec.axis=sec_axis(~ .*5, name="Incidence (%)",breaks = seq(0,100,10))) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust=0.5)) +
+  #theme(# Hide panel borders and remove grid lines panel.grid.major = element_blank(),# Change axis line) +
+  geom_hline(yintercept=0, linetype=1, color = "red")
+# Saving the figure in pdf format
+pdf('../../Figures/Differential_analysis/Genera.pdf',width=6,height=8,useDingbats=FALSE)
+deseq2_p
+dev.off() # Close the pdf file
+sigtab_ASVs = sigtab
+```
+
+
+###### 16S rRNA (KEGGs) | identifying functions of interest
+```{r}
+# Importing keggs as a phyloseq object and adding parent class
+ps_func16S = func16S %>% otu_table(taxa_are_rows = T)
+rownames(ps_func16S) = rownames(func16S)
+# Importing parent classes of KEGGS and subsetting the table
+parent_classes = fread("../../Data/Metabarcoding/16S_metabarcoding/Results_16S/Trimmed_data/pirust2_out_pipeline/KO_metagenome_out/KEGG_parent_classes_gathered.txt")
+parent_classes = parent_classes[parent_classes$KO %in% rownames(ps_func16S),]
+Unclassified_KO<-data.frame(KO=rownames(ps_func16S)[which(rownames(ps_func16S) %ni% parent_classes$KO)]
+,Rank1="Unclassified",Rank2="Unclassified",Rank3="Unclassified", Function="Unclassified", stringsAsFactors = F)
+parent_classes = rbind(parent_classes,Unclassified_KO)
+# Importing the data into a phyloseq object
+parent_classes_ps = tax_table(parent_classes)
+rownames(parent_classes_ps) = parent_classes$KO
+ps_func16S = phyloseq(ps_func16S,parent_classes_ps,ps@sam_data)
+colnames(ps_func16S@tax_table@.Data) = c("KO", "Rank1","Rank2","Rank3","Function")
+ps_func16S@sam_data$distance_group = factor(ps_func16S@sam_data$distance_group, levels = c("R", "100","C"))
+# Converting data into a DeSeq2 object
+diagdds_ps = phyloseq_to_deseq2(ps_func16S, ~ distance_group)
+# Calculating the geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds_ps), 1, gm_mean)
+Temp = estimateSizeFactors(diagdds_ps, geoMeans = geoMeans)
+# Performing DeSeq2
+Temp = DESeq(Temp, fitType="local")
+# Extracting results from the DeSeq2 analysis
+res = results(Temp, cooksCutoff = FALSE)
+# Keeping significant results only
+sigtab = res[which(res$padj <= 0.05), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(ps_func16S)[rownames(sigtab), ], "matrix"))
+sigtab = sigtab[complete.cases(sigtab), ]
+# Adding incidence of taxa
+taxa_sum = phyloseq_standardize_otu_abundance(ps_func16S, method = "pa") %>% taxa_sums() %>% as.data.frame()
+taxa_sum$KO = row.names(taxa_sum)
+taxa_sum = taxa_sum[taxa_sum$KO %in% rownames(sigtab),] 
+for (i in c(1:nrow(sigtab))) {
+  sigtab$Incidence[i] = taxa_sum[which(taxa_sum$KO == rownames(sigtab)[i]),]$. / nsamples(ps_func16S) * 100
+}
+sigtab = sigtab %>% mutate_if(is.factor,as.character)
+sigtab = sigtab %>% dplyr::group_by(Function) %>% mutate(Function2 = if(n( ) > 1) {paste0(Function, row_number( ))} else {paste0(Function)})
+sigtab = sigtab[order(sigtab$log2FoldChange),]
+sigtab$Function2 = factor(sigtab$Function2, levels = sigtab$Function2)
+# Producing the barplot figure 
+P = ggplot(sigtab, aes(x=Function2)) +
+   geom_col(aes(y=sigtab$log2FoldChange, fill= Rank2) ) +
+   scale_fill_brewer(palette = "Blues") +
+   geom_point(aes(y=sigtab$Incidence/5),size=4)  +
+   scale_size_continuous(range = c(1,4)) +
+   geom_segment(aes(x=Function2, xend=Function2, y=0, yend=Incidence/5),linetype=3) +
+   scale_y_continuous(name="Log2FoldChange",breaks = seq(0,25,5) , sec.axis=sec_axis(~ .*5, name="Incidence (%)",breaks = seq(0,100,10))) +
+   theme_minimal() +
+   theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust=0.5)) +
+   geom_hline(yintercept=0, linetype=1, color = "red")
+# Saving the figure in pdf format
+pdf('../../Figures/Differential_analysis/KEGGs.pdf',width=12,height=8,useDingbats=FALSE)
+P
+dev.off() # Close the pdf file
+sigtab_KEGGs = sigtab
+```
+
+##### Fatty acides | identifying FAs of interest
+```{r}
+# Loading the data
+fa = readxl::read_excel("../../../Lipids/FA_profile_polymastia.xlsx") %>% clean_names()
+# Renaming samples
+fa$sample_id = c("42","38","41","NA","64","59","54","62","37","55","67","69","51","66","53","56","57","65","48","40","39","44","43","46","45","36","47","61","68","63","58")
+fa = fa[fa$sample_id %in% gsub("Sample_.*-","",rownames(test)),]
+fa = fa[match(gsub("Sample_.*-","",rownames(test)),fa$sample_id),]
+#all(fa$sample_id == (gsub("Sample_.*-","",rownames(test))))
+fa_ps = otu_table(fa %>% column_to_rownames("sample_id"),taxa_are_rows = F)
+fa_env_ps = sample_data(test[,"condition"] %>% as.data.frame())
+rownames(fa_env_ps) = fa$sample_id
+# Importing samples into a phyloseq object
+fa_ps = merge_phyloseq(fa_ps,fa_env_ps)
+fa_ps@sam_data$distance_group = factor(fa_ps@sam_data$., levels = c("Reference", "100m","Cage"))
+# Importing data into deseq2 format
+diagdds_ps = phyloseq_to_deseq2(fa_ps, ~ distance_group)
+# Calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds_ps), 1, gm_mean)
+d <- estimateSizeFactors(diagdds_ps)
+d <- estimateDispersionsGeneEst(d)
+dispersions(d) <- mcols(d)$dispGeneEst
+# Performing DeSeq2 with Wald test to deal with low dispersion
+d <- nbinomWaldTest(d) # Instead of DESeq(d)
+res <- results(d)
+# None of the FAs were found to be significantly affected by fish farming so we won't trim by p-value
+sigtab = res[which(res$padj <= 1), ]
+sigtab = as(sigtab, "data.frame")
+sigtab = sigtab[complete.cases(sigtab), ]
+# Ordering results by log2 fold change
+sigtab = sigtab[order(abs(sigtab$log2FoldChange), decreasing = T),]
+sigtab = sigtab %>% rownames_to_column("Sample_ID")
+# Keeping the 20 FAs with highest log2fold values 
+sigtab = sigtab[1:20,]
+sigtab = sigtab[order(sigtab$log2FoldChange),]
+sigtab$Sample_ID = factor(sigtab$Sample_ID, levels = sigtab$Sample_ID)
+# Creating barplot figure
+color_palette <- colorRampPalette(colors = c("gold", "gold4"))(length(sigtab$Sample_ID))
+P = ggplot(sigtab, aes(x=Sample_ID,fill = Sample_ID)) +
+   geom_col(aes(y=log2FoldChange) ) +
+   scale_fill_manual(values = color_palette) +
+   theme_minimal() +
+   theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust=0.5)) +
+   geom_hline(yintercept=0, linetype=1, color = "red")
+# Saving the figure as pdf
+pdf('../../Figures/Differential_analysis/FA.pdf',width=12,height=8,useDingbats=FALSE)
+P + theme(legend.position = "none")
+dev.off() # Close the pdf file
+sigtab_FA = sigtab
+```
+
+
+##### Stable isotopes | identifying SIs of interest
+```{r}
+# Loading isotope data
+SI = readxl::read_excel("../../Data/Stable_isotopes/Stable_isotopes.xlsx") %>% clean_names()
+# Relabeling the samples
+SI$sample_id = gsub("_CN$","",SI$sample_id)
+SI$sample_id = c("42","38","41","NA","64","59","54","62","37","55","67","69","51","66","53","56","57","65","48","40","39","44","43","46","45","36","47","61","68","63","58")
+SI = SI[SI$sample_id %in% gsub("Sample_.*-","",rownames(test)),]
+SI = SI[match(gsub("Sample_.*-","",rownames(test)),SI$sample_id),]
+#all(SI$sample_id == (gsub("Sample_.*-","",rownames(test))))
+SI = SI[,c("sample_id","percent_carbon_dry_weight","percent_nitrogen_dry_weight")]
+# Adding percent of nitrogen per dry weight on percent of carbon per dry weight
+SI$N15_C13 = (SI$percent_nitrogen_dry_weight / SI$percent_carbon_dry_weight) * 100
+# importing the data into a phyloseq object
+SI_ps = otu_table(SI %>% column_to_rownames("sample_id"),taxa_are_rows = F)
+SI_env_ps = sample_data(test[,"condition"] %>% as.data.frame())
+rownames(SI_env_ps) = SI$sample_id
+SI_ps = merge_phyloseq(SI_ps,SI_env_ps)
+SI_ps@sam_data$distance_group = factor(SI_ps@sam_data$., levels = c("Reference", "100m","Cage"))
+# Converting data into Deseq2 format
+diagdds_ps = phyloseq_to_deseq2(SI_ps, ~ distance_group)
+# Calculating geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(diagdds_ps), 1, gm_mean)
+d <- estimateSizeFactors(diagdds_ps)
+d <- estimateDispersionsGeneEst(d)
+dispersions(d) <- mcols(d)$dispGeneEst
+# Performing DeSeq2 with Wald test to deal with low dispersion
+d <- nbinomWaldTest(d) # Instead of DESeq(d)
+# Extracting results from DeSeq2
+res <- results(d)
+# None of the SIs were found to be significantly affected by fish farming so we won't trim by p-value
+sigtab = res[which(res$padj <= 1), ]
+sigtab = as(sigtab, "data.frame")
+sigtab = sigtab[complete.cases(sigtab), ]
+# Ordering SIs by log2 fold change
+sigtab = sigtab[order(abs(sigtab$log2FoldChange), decreasing = T),]
+sigtab = sigtab %>% rownames_to_column("Sample_ID")
+sigtab = sigtab[order(sigtab$log2FoldChange),]
+sigtab$Sample_ID = factor(sigtab$Sample_ID, levels = sigtab$Sample_ID)
+# Creating the barplot figure
+color_palette <- colorRampPalette(colors = c("salmon", "salmon4"))(length(sigtab$Sample_ID))
+P = ggplot(sigtab, aes(x=Sample_ID,fill = Sample_ID)) +
+   geom_col(aes(y=log2FoldChange) ) +
+   scale_fill_manual(values = color_palette) +
+   theme_minimal() +
+   theme(axis.text.x = element_text(angle = -25, hjust = 0, vjust=0.5)) +
+   geom_hline(yintercept=0, linetype=1, color = "red")
+# Saving the figure in pdf format
+pdf('../../Figures/Differential_analysis/SI.pdf',width=12,height=8,useDingbats=FALSE)
+P + theme(legend.position = "none")
+dev.off() # Close the pdf file
+sigtab_FA = sigtab
+```
+
